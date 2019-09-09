@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"encoding/json"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -25,6 +26,9 @@ import (
 	"github.com/docker/machine/libmachine/mcnutils"
 	"github.com/docker/machine/libmachine/ssh"
 	"github.com/docker/machine/libmachine/state"
+	"os"
+	"os/user"
+	"path/filepath"
 )
 
 const (
@@ -43,6 +47,7 @@ const (
 	defaultSSHUser              = "ubuntu"
 	defaultSpotPrice            = "0.50"
 	defaultBlockDurationMinutes = 0
+	instanceCacheMaxAge         = 5 * time.Minute
 )
 
 const (
@@ -871,6 +876,7 @@ func (d *Driver) GetSSHUsername() string {
 }
 
 func (d *Driver) Start() error {
+	removeCacheFile(d.InstanceId)
 	_, err := d.getClient().StartInstances(&ec2.StartInstancesInput{
 		InstanceIds: []*string{&d.InstanceId},
 	})
@@ -882,6 +888,7 @@ func (d *Driver) Start() error {
 }
 
 func (d *Driver) Stop() error {
+	removeCacheFile(d.InstanceId)
 	_, err := d.getClient().StopInstances(&ec2.StopInstancesInput{
 		InstanceIds: []*string{&d.InstanceId},
 		Force:       aws.Bool(false),
@@ -890,6 +897,7 @@ func (d *Driver) Stop() error {
 }
 
 func (d *Driver) Restart() error {
+	removeCacheFile(d.InstanceId)
 	_, err := d.getClient().RebootInstances(&ec2.RebootInstancesInput{
 		InstanceIds: []*string{&d.InstanceId},
 	})
@@ -897,6 +905,7 @@ func (d *Driver) Restart() error {
 }
 
 func (d *Driver) Kill() error {
+	removeCacheFile(d.InstanceId)
 	_, err := d.getClient().StopInstances(&ec2.StopInstancesInput{
 		InstanceIds: []*string{&d.InstanceId},
 		Force:       aws.Bool(true),
@@ -927,6 +936,8 @@ func (d *Driver) Remove() error {
 		}
 	}
 
+	removeCacheFile(d.InstanceId)
+
 	if len(multierr.Errs) == 0 {
 		return nil
 	}
@@ -944,6 +955,83 @@ func (d *Driver) cancelSpotInstanceRequest() error {
 }
 
 func (d *Driver) getInstance() (*ec2.Instance, error) {
+	instance, err := d.getInstanceFromCache()
+
+	if err == nil {
+		return instance, nil
+	}
+
+	instance, err = d.getInstanceFromAWS()
+	if err == nil {
+		d.saveCache(instance)
+	}
+
+	return instance, err
+}
+
+func (d *Driver) saveCache(instance *ec2.Instance) {
+	if *instance.State.Name != ec2.InstanceStateNameRunning {
+		return
+	}
+	cacheFilePath, err := getCacheFilePath(d.InstanceId)
+	if err != nil {
+		return
+	}
+
+	err = os.MkdirAll(filepath.Dir(cacheFilePath), 0755)
+	if err != nil {
+		return
+	}
+
+	f, err := os.OpenFile(cacheFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return
+	}
+
+	data, err := json.Marshal(instance)
+	if err != nil {
+		return
+	}
+
+	if _, err := f.Write(data); err != nil {
+		return
+	}
+
+	if err := f.Close(); err != nil {
+		return
+	}
+
+	return
+}
+
+func (d *Driver) getInstanceFromCache() (*ec2.Instance, error) {
+	cacheFilePath, err := getCacheFilePath(d.InstanceId)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := os.Stat(cacheFilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	if info.ModTime().Add(instanceCacheMaxAge).Before(time.Now()) {
+		return nil, errors.New("cache file is too old")
+	}
+
+	f, err := os.Open(cacheFilePath)
+	if err != nil {
+		return nil, err
+	}
+	var instance ec2.Instance
+
+	jsonParser := json.NewDecoder(f)
+	err = jsonParser.Decode(&instance)
+
+	return &instance, err
+}
+
+func (d *Driver) getInstanceFromAWS() (*ec2.Instance, error) {
 	instances, err := d.getClient().DescribeInstances(&ec2.DescribeInstancesInput{
 		InstanceIds: []*string{&d.InstanceId},
 	})
@@ -1292,4 +1380,19 @@ func generateId() string {
 	h := md5.New()
 	io.WriteString(h, string(rb))
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func removeCacheFile(instance string) {
+	cacheFile, err := getCacheFilePath(instance)
+	if err == nil {
+		os.Remove(cacheFile)
+	}
+}
+
+func getCacheFilePath(instance string) (string, error) {
+	usr, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(usr.HomeDir, ".cache", "docker", "machine", "amazonec2", fmt.Sprintf("%s.json", instance)), nil
 }
