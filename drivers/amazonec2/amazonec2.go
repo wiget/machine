@@ -637,6 +637,8 @@ func (d *Driver) innerCreate() error {
 
 	var instance *ec2.Instance
 
+	tags := d.createTags(d.Tags)
+
 	if d.RequestSpotInstance {
 		req := ec2.RequestSpotInstancesInput{
 			LaunchSpecification: &ec2.RequestSpotLaunchSpecification{
@@ -720,6 +722,7 @@ func (d *Driver) innerCreate() error {
 			return fmt.Errorf("Error resolving spot instance to real instance: %v", err)
 		}
 	} else {
+		resourceType := "instance"
 		inst, err := d.getClient().RunInstances(&ec2.RunInstancesInput{
 			ImageId:  &d.AMI,
 			MinCount: aws.Int64(1),
@@ -737,6 +740,10 @@ func (d *Driver) innerCreate() error {
 			EbsOptimized:        &d.UseEbsOptimizedInstance,
 			BlockDeviceMappings: []*ec2.BlockDeviceMapping{bdm},
 			UserData:            &userdata,
+			TagSpecifications:    []*ec2.TagSpecification{{
+				ResourceType: &resourceType,
+				Tags: tags,
+			}},
 		})
 
 		if err != nil {
@@ -764,11 +771,13 @@ func (d *Driver) innerCreate() error {
 		d.PrivateIPAddress,
 	)
 
-	log.Debug("Settings tags for instance")
-	err := d.configureTags(d.Tags)
+	if d.RequestSpotInstance {
+		log.Debug("Settings tags for instance")
+		err := d.configureTags(d.Tags)
 
-	if err != nil {
-		return fmt.Errorf("Unable to tag instance %s: %s", d.InstanceId, err)
+		if err != nil {
+			return fmt.Errorf("Unable to tag instance %s: %s", d.InstanceId, err)
+		}
 	}
 
 	return nil
@@ -1052,11 +1061,25 @@ func (d *Driver) securityGroupAvailableFunc(id string) func() bool {
 
 func (d *Driver) configureTags(tagGroups string) error {
 
-	tags := []*ec2.Tag{}
-	tags = append(tags, &ec2.Tag{
+	tags := d.createTags(tagGroups)
+
+	_, err := d.getClient().CreateTags(&ec2.CreateTagsInput{
+		Resources: []*string{&d.InstanceId},
+		Tags:      tags,
+	})
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (d *Driver) createTags(tagGroups string) []*ec2.Tag {
+	tags := []*ec2.Tag{{
 		Key:   aws.String("Name"),
 		Value: &d.MachineName,
-	})
+	}}
 
 	if tagGroups != "" {
 		t := strings.Split(tagGroups, ",")
@@ -1070,17 +1093,7 @@ func (d *Driver) configureTags(tagGroups string) error {
 			})
 		}
 	}
-
-	_, err := d.getClient().CreateTags(&ec2.CreateTagsInput{
-		Resources: []*string{&d.InstanceId},
-		Tags:      tags,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return tags
 }
 
 func (d *Driver) configureSecurityGroups(groupNames []string) error {
