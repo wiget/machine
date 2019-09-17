@@ -1050,6 +1050,9 @@ func (d *Driver) getInstanceFromAWS() (*ec2.Instance, error) {
 	if err != nil {
 		return nil, err
 	}
+	if (len(instances.Reservations) == 0) || (len(instances.Reservations[0].Instances) == 0) {
+		return nil, fmt.Errorf("no such EC2 instance with Id: %s", d.InstanceId)
+	}
 	return instances.Reservations[0].Instances[0], nil
 }
 
