@@ -784,17 +784,6 @@ func (d *Driver) innerCreate() error {
 		if err != nil {
 			return fmt.Errorf("Unable to tag instance %s: %s", d.InstanceId, err)
 		}
-
-		_, err2 := d.getClient().ModifyInstanceAttribute(&ec2.ModifyInstanceAttributeInput{
-			InstanceId: instance.InstanceId,
-			InstanceInitiatedShutdownBehavior: &ec2.AttributeValue{
-				Value: aws.String("terminate"),
-			},
-		})
-		if err2 != nil {
-			return fmt.Errorf("Unable to change instance initiated shutdown behavior %s: %s", d.InstanceId, err)
-		}
-
 	}
 
 	return nil
